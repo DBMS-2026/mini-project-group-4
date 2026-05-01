@@ -1,293 +1,618 @@
-<div align="center">
+# MiniDB Engine
 
-# 🗄️ MiniDB Engine
+MiniDB is a relational database engine built from scratch in C++. It does not wrap SQLite or MySQL. It manages its own table metadata, page-based row storage, B+ Tree indexing, buffer pool caching, SQL-like parsing, recovery logging, and a small authenticated REST API.
 
-### A Relational Database Built From Scratch in C++
+This repository is currently at the stage where the core engine is working end to end:
 
-*Disk storage · B+ Tree indexing · LRU buffer pool · Custom query engine — zero dependencies on existing databases*
-
-[![Language: C++](https://img.shields.io/badge/Language-C++17-blue?style=flat-square&logo=cplusplus)](https://isocpp.org/)
-[![Build: Make](https://img.shields.io/badge/Build-Make%20%2F%20GCC-orange?style=flat-square)]()
-[![Interface: Terminal](https://img.shields.io/badge/Interface-Terminal-black?style=flat-square)]()
-[![Status: Active](https://img.shields.io/badge/Status-Active%20Development-green?style=flat-square)]()
-
-</div>
-
----
-
-## What Is MiniDB?
-
-MiniDB is a from-scratch relational database engine — not a wrapper around SQLite or MySQL, but a ground-up system that replicates how real DBMSs work internally.
-
-It runs entirely in the **terminal**. You log in, get a menu, and interact through a numbered interface or by typing SQL-like queries. Under the hood, it manages its own disk storage, in-memory buffer pool, B+ Tree index structures, and a SQL-like query parser.
+- authenticated CLI login and first-user bootstrap
+- `CREATE`, `INSERT`, `SELECT`, `SHOW TABLES`, `UPDATE`, `DROP`
+- page-based storage with slotted pages and `RID(page_id, slot_id)`
+- persistent B+ Tree index on the primary key
+- buffer-pool-backed read/write paths
+- WAL-style REDO recovery on restart
+- REST API server
+- Docker packaging for portable local deployment
 
 ---
 
-## Getting Started
+## Table of Contents
 
-### Build
+- [Project Status](#project-status)
+- [Current Capabilities](#current-capabilities)
+- [How It Works](#how-it-works)
+- [Build and Run](#build-and-run)
+- [Query Console](#query-console)
+- [Search Behavior](#search-behavior)
+- [Storage Architecture](#storage-architecture)
+- [Recovery Layer](#recovery-layer)
+- [REST API](#rest-api)
+- [Docker](#docker)
+- [Repository Layout](#repository-layout)
+- [Tech Stack](#tech-stack)
+- [Known Scope Limits](#known-scope-limits)
+
+---
+
+## Project Status
+
+MiniDB is not a toy parser sitting on text files anymore. The current `main` branch has a functioning storage engine core with:
+
+- fixed-size page storage in `data.dat`
+- row addressing through `RID`
+- buffer pool caching with dirty tracking and checkpoints
+- B+ Tree primary-key lookup
+- update support, including tuple relocation when the new row no longer fits in the old slot
+- startup recovery through WAL replay
+
+It is still a learning/project DBMS, not a production-ready database. That distinction matters. The storage and execution model is real, but advanced production concerns like concurrency control, transaction isolation, and full ARIES-style recovery are not complete.
+
+---
+
+## Current Capabilities
+
+### SQL-like Operations
+
+The current Query Console supports:
+
+- `SHOW TABLES;`
+- `CREATE TABLE ...;`
+- `INSERT INTO ... VALUES (...);`
+- `SELECT * FROM ...;`
+- `SELECT col1, col2 FROM ...;`
+- `SELECT ... WHERE ...;`
+- `UPDATE ... SET ... WHERE ...;`
+- `DROP TABLE ...;`
+
+### Interactive Menu
+
+The terminal menu currently exposes:
+
+1. Query Console
+2. Search table / search inside table
+3. Print metadata of a table
+4. Help
+5. Quit
+
+### Storage and Execution Features
+
+- Page-based row storage inside `table/<name>/data.dat`
+- Table metadata stored separately in `table/<name>/met`
+- Persistent B+ Tree stored in `table/<name>/index.dat`
+- Slotted-page layout through `DataPage`
+- Tuple serialization for `INT` and `VARCHAR`
+- `RID(page_id, slot_id)` addressing
+- Buffer pool manager with:
+  - page table
+  - pin count
+  - dirty bit
+  - LRU-style replacement
+  - stats and checkpoint support
+- WAL-style page REDO logging and startup recovery
+
+### Authentication
+
+MiniDB now has a system-level `auth` table.
+
+- On the first run, it creates the initial user.
+- On later runs, it authenticates the username and password.
+- The REST API uses session tokens derived from login.
+
+---
+
+## How It Works
+
+At a high level, the engine flow is:
+
+```text
+CLI / Query Console / API
+-> Parser
+-> Execution path
+-> B+ Tree lookup or linear scan
+-> Buffer Pool Manager
+-> Disk Manager
+-> data.dat / index.dat / met
+```
+
+For an insert:
+
+```text
+row values
+-> TupleSerializer
+-> DataPage insert into a slotted page
+-> RID(page_id, slot_id)
+-> B+ Tree key -> RID mapping
+-> WAL record
+-> flush through BufferPoolManager / DiskManager
+```
+
+For a primary-key select:
+
+```text
+WHERE id = ...
+-> B+ Tree search
+-> RID
+-> BufferPoolManager fetch
+-> DataPage read
+-> TupleSerializer deserialize
+-> print result
+```
+
+For a non-primary-key search:
+
+```text
+WHERE non_pk_col = ...
+-> linear scan across pages
+-> deserialize row by row
+-> match filter
+-> print result
+```
+
+---
+
+## Build and Run
+
+### Build the CLI
 
 ```bash
 make
 ```
 
-### Run
+### Run the CLI
 
 ```bash
-./minidb -u <username> -p
-# Enter password when prompted (default: pass)
+./miniDB -u <username> -p
 ```
 
-### Terminal Menu
+Important behavior:
 
-Once logged in, MiniDB presents a numbered menu:
+- if no users exist yet, MiniDB will create the initial user
+- otherwise it will prompt for the password of the given username
 
+Example:
+
+```bash
+./miniDB -u aryan -p
 ```
-1. Query Console  (CREATE / INSERT / SELECT / SHOW / DROP)
-2. Search table / search inside table
-3. Print metadata of a table
-4. Help
-5. Quit
+
+### Build the API server
+
+```bash
+make api
 ```
 
-All SQL-like operations are now routed through the **Query Console** (option 1). Type `BACK` or `EXIT` inside the console to return to the main menu.
+This builds:
+
+- `miniDB`
+- `server`
+
+Then run:
+
+```bash
+./server
+```
+
+The API server listens on:
+
+```text
+http://localhost:18080
+```
 
 ---
 
-## Architecture
+## Query Console
 
-```
-  SQL Query (typed in Query Console)
-           │
-           ▼
-  ┌─────────────────┐
-  │   Query Parser  │  Tokenizes input → dispatches to handler
-  │   (parser.cpp)  │  Preserves quoted string values correctly
-  └────────┬────────┘
-           │
-    ┌──────┴──────┬──────────────┬──────────┐
-    ▼             ▼              ▼          ▼
- create.cpp   insert.cpp    display.cpp  where.cpp
- (DDL)        (DML insert)  (SELECT/SHOW) (WHERE filter)
-    │             │              │
-    └──────┬──────┘              │
-           ▼                     ▼
-  ┌────────────────┐   ┌──────────────────┐
-  │  Index Manager │   │  Buffer Pool Mgr │  LRU cache
-  │  (BPtree.cpp)  │   │  (buffer_pool_   │  avoids redundant
-  └───────┬────────┘   │   manager.cpp)   │  disk reads
-          │            └────────┬─────────┘
-          └──────────┬──────────┘
-                     ▼
-          ┌─────────────────────┐
-          │   Storage Manager   │  Fixed-size 4 KB page I/O
-          │  (disk_manager.cpp) │
-          └─────────────────────┘
-                     │
-                     ▼
-              table/<name>/
-              ├── data.dat     ← slotted pages holding row data
-              ├── index.dat    ← B+ Tree node pages
-              └── met          ← schema (column names, types, sizes)
-```
+Once logged in, choose option `1` to enter the Query Console.
 
-| Layer | File | What it does |
-|---|---|---|
-| Query Parser | `parser.cpp` | Tokenizes SQL strings, routes to handler; handles quoted values |
-| DDL Execution | `create.cpp` | `CREATE TABLE` with primary key constraint, initializes B+ Tree |
-| DML Insert | `insert.cpp` | Buffer-pool-aware insert, updates index with RID |
-| DML Select | `display.cpp` | `SELECT`, `SHOW TABLES`, column projection |
-| WHERE Filter | `where.cpp` | B+ Tree point lookup (PK) or linear scan (non-PK) |
-| Index Manager | `BPtree.cpp` | Persistent B+ Tree on `index.dat` |
-| Buffer Pool Manager | `buffer_pool_manager.cpp` | LRU page cache between execution and disk |
-| Data Page | `data_page.cpp` | Slotted-page layout inside each 4 KB block |
-| Disk Manager | `disk_manager.cpp` | Raw page read/write at byte offsets in a file |
-| Tuple Serializer | `tuple_serializer.cpp` | Packs/unpacks row values to/from raw bytes |
-| File Handler | `file_handler.cpp` | Metadata read/write, table registry management |
-
----
-
-## Features
-
-### Storage Engine
-
-- **Block-based disk I/O** — data lives in fixed-size 4 KB pages inside `data.dat`, one file per table, matching real DBMS page architecture.
-- **Slotted page layout** — each page has a header, a slot directory growing from the front, and tuple data packed from the back. Rows are addressed by `(page_id, slot_id)` — a Record ID (RID).
-- **Tuple serialization** — rows are serialized to raw bytes on insert and deserialized back to typed values on read. VARCHARs are stored with a `uint16_t` length prefix (variable-length, not padded).
-- **Eager flush** — `DiskManager` flushes writes immediately after each page write and on close, ensuring persistence for testing and correctness.
-
-### B+ Tree Index
-
-- Multi-level B+ Tree on the primary key (always the first `INT` column), persisted to `index.dat`.
-- `O(log n)` key lookup, returning the RID `(page_id, slot_id)` of the matching row.
-- Nodes hold up to `MAX_KEYS` entries and split automatically on overflow.
-- Leaf nodes are **doubly linked** (`next_page_id` / `prev_page_id`) for range scan support.
-- Page 0 of `index.dat` stores the root page ID as metadata; the tree is fully serialized to disk.
-
-### Buffer Pool Manager
-
-- In-memory **LRU page cache** sits between the execution layer and the disk.
-- Pages are **pinned** on fetch and **unpinned** after use; dirty pages are flushed back to disk.
-- Reduces redundant disk reads when the same page is accessed multiple times within a query.
-- Used by both `insert.cpp` (write path) and `display.cpp` (read path).
-
-### Query Parser
-
-- Accepts freeform SQL-like strings from the Query Console.
-- Handles **quoted string values** (`'...'` and `"..."`) correctly — preserves original case and strips quotes before processing.
-- Lowercases only SQL keywords; table names, column names, and varchar values retain their original case.
-- `keyword_lower_copy` ensures only keywords outside quotes are lowercased during parsing.
-
-### WHERE Clause Execution
-
-- Automatically selects the optimal search strategy:
-  - **B+ Tree point lookup** when the WHERE column is the primary key (INT).
-  - **Linear scan** over all pages when filtering on a non-primary-key column.
-- Supports `SELECT col1, col2 FROM table WHERE col = value` with column projection.
-
-### Primary Key Constraint
-
-- The first column of every table **must be `INT`** — enforced at `CREATE TABLE` time.
-- Duplicate primary key values are rejected at insert time by checking the B+ Tree before writing.
-
----
-
-## Supported Operations
-
-| Operation | Syntax | Status |
-|---|---|---|
-| `SHOW TABLES` | `SHOW TABLES;` | ✅ Working |
-| `CREATE TABLE` | `CREATE TABLE name (col TYPE, ...);` | ✅ Working |
-| `INSERT INTO` | `INSERT INTO name VALUES (v1, v2, ...);` | ✅ Working |
-| `DROP TABLE` | `DROP TABLE name;` | ✅ Working |
-| `SELECT *` | `SELECT * FROM name;` | ✅ Working |
-| `SELECT cols` | `SELECT col1, col2 FROM name;` | ✅ Working |
-| `SELECT WHERE (PK)` | `SELECT * FROM name WHERE id = 1;` | ✅ B+ Tree lookup |
-| `SELECT WHERE (non-PK)` | `SELECT * FROM name WHERE name = Raj;` | ✅ Linear scan |
-| View table metadata | Menu option 3 | ✅ Working |
-| REST API Querying | `make api` → `./server` | ✅ Working |
-| Search (menu) | Menu option 2 | 🚧 In progress |
-
----
-
-## Query Syntax
+Supported examples:
 
 ```sql
--- Show all tables
 SHOW TABLES;
 
--- Create a table (first column must be INT — it is the primary key)
 CREATE TABLE students (id INT, name VARCHAR(50), dept VARCHAR(20));
-CREATE TABLE employees (emp_id INT, email VARCHAR(100), salary INT);
 
--- Insert a row
-INSERT INTO students VALUES (1, Anshdeep Singh, CSE);
-INSERT INTO students VALUES (2, "Aditya Sirsalkar", "CSE");   -- quotes optional
+INSERT INTO students VALUES (1, "Aditya", "CSE");
+INSERT INTO students VALUES (2, "Aryan", "DBMS");
 
--- Select all columns
 SELECT * FROM students;
-
--- Select specific columns
 SELECT name, dept FROM students;
-
--- Filter with WHERE (uses B+ Tree if filtering on primary key)
 SELECT * FROM students WHERE id = 1;
 
--- Filter on non-primary-key column (uses linear scan)
-SELECT * FROM students WHERE dept = CSE;
+UPDATE students SET dept = ECE WHERE id = 1;
 
--- Drop a table
 DROP TABLE students;
 ```
 
-**Notes:**
-- SQL keywords (`SELECT`, `FROM`, `WHERE`, etc.) are **case-insensitive**.
-- Table names and column names are **case-sensitive**.
-- VARCHAR values keep their original case exactly as typed.
-- Quotes (`'` or `"`) are optional for VARCHAR values but recommended for multi-word strings.
-- The first column must be `INT` (used as the primary key for B+ Tree indexing).
-- INSERT values must match the column order defined in `CREATE TABLE`.
+Notes:
+
+- SQL keywords are case-insensitive
+- table names and column names are case-sensitive
+- `VARCHAR` values preserve original case
+- first column must be `INT`
+- the first column acts as the primary key index target
 
 ---
 
-## Data Types
+## Search Behavior
 
-| Type | Syntax variants | Storage |
-|---|---|---|
-| Integer | `INT`, `INTEGER` | 4 bytes (`int32_t`) |
-| Variable-length string | `VARCHAR`, `VARCHAR(n)` | 2-byte length prefix + actual string bytes |
+MiniDB uses two different search paths depending on the `WHERE` column:
 
-> If no size is specified for `VARCHAR`, `MAX_VARCHAR` is used as the default maximum length.
+### Primary-key search
 
----
+If the `WHERE` column is the first `INT` column:
 
-## File Layout
+- the query routes to the B+ Tree
+- the tree returns `RID(page_id, slot_id)`
+- the engine fetches the page and reads the row directly
 
+The CLI prints:
+
+```text
+[Search Strategy: B+ Tree Point Lookup on Primary Key]
 ```
-DBMS/
-├── src/
-│   ├── main.cpp                 # Entry point, login, menu loop, query console
-│   ├── parser.cpp               # SQL tokenizer and query router
-│   ├── create.cpp               # CREATE TABLE — validates PK, stores metadata, initializes index
-│   ├── insert.cpp               # INSERT — buffer pool write path, B+ Tree update
-│   ├── display.cpp              # SELECT, SHOW TABLES, table metadata display
-│   ├── where.cpp                # WHERE clause — B+ Tree lookup or linear scan
-│   ├── BPtree.cpp               # B+ Tree index (persisted to index.dat)
-│   ├── disk_manager.cpp         # Page-based file I/O (4 KB fixed pages)
-│   ├── buffer_pool_manager.cpp  # LRU buffer pool (in-memory page cache)
-│   ├── data_page.cpp            # Slotted page layout
-│   ├── tuple_serializer.cpp     # Row serialization/deserialization
-│   └── file_handler.cpp         # Metadata I/O, table registry (table_list)
-├── include/                     # Header files
-├── table/                       # Created at runtime — one folder per table
-│   ├── table_list               # Central registry of all table names
-│   └── <table_name>/
-│       ├── data.dat             # Row data (slotted pages)
-│       ├── index.dat            # B+ Tree nodes
-│       └── met                  # Table schema (binary struct)
-├── Makefile
-├── README.md
-└── SYNTAX.md
+
+### Non-primary-key search
+
+If the `WHERE` column is not the primary key:
+
+- the engine scans all pages linearly
+- each tuple is deserialized
+- rows are matched one by one
+
+The CLI prints:
+
+```text
+[Search Strategy: Linear Scan]
 ```
 
 ---
 
-## API Integration
+## Storage Architecture
 
-MiniDB includes a REST API server built with the [Crow](https://github.com/CrowCpp/Crow) microframework, allowing external access from Node.js, Python, or a browser.
+### 1. Table Metadata
+
+Each table stores schema metadata in:
+
+```text
+table/<table_name>/met
+```
+
+This contains:
+
+- table name
+- column names
+- column types
+- column sizes
+- record size
+- record count
+
+### 2. Data Pages
+
+Actual row data is stored in:
+
+```text
+table/<table_name>/data.dat
+```
+
+Rows are not stored one-file-per-row. They are packed into fixed-size pages.
+
+MiniDB currently uses:
+
+- fixed-size page I/O
+- slotted-page layout
+- `PageHeader`
+- `SlotEntry`
+- `RID(page_id, slot_id)`
+
+### 3. Tuple Serialization
+
+Rows are converted to raw bytes before storage.
+
+- `INT` -> fixed 4 bytes
+- `VARCHAR` -> length-prefixed bytes
+
+That conversion is handled by:
+
+- [`tuple_serializer.cpp`](./src/tuple_serializer.cpp)
+
+### 4. Buffer Pool
+
+The buffer pool sits between the execution layer and disk I/O.
+
+It manages:
+
+- cached page frames
+- `page_id -> frame_id` mapping
+- dirty pages
+- pin counts
+- checkpointing
+- replacement policy support
+
+This means inserts, display, search, and current local update work on page copies in RAM first, then flush changes back to disk.
+
+### 5. Index Storage
+
+Primary-key indexing is persisted in:
+
+```text
+table/<table_name>/index.dat
+```
+
+The B+ Tree stores:
+
+```text
+primary_key -> RID(page_id, slot_id)
+```
+
+This gives fast point lookup for primary-key queries.
+
+---
+
+## Recovery Layer
+
+MiniDB now has a simple WAL-style REDO recovery layer.
+
+### What it does
+
+Before certain page changes are finalized, the engine writes a recovery record that stores the page after-image needed to replay the operation later.
+
+On restart:
+
+- `recover_all_tables()` scans WAL files
+- pending records are replayed
+- data pages and index state are repaired
+
+### What this currently covers
+
+- recovery-aware insert path
+- recovery-aware update path
+- restart-time REDO replay
+
+### What it is not yet
+
+This is not a full transaction system. It is not full ARIES. It is not full undo/redo with concurrency.
+
+The current layer is best described as:
+
+- WAL-inspired
+- REDO-based
+- crash-demo-friendly
+
+### Deterministic recovery testing
+
+The engine also includes a crash failpoint for controlled demos:
 
 ```bash
-# Build the API server
-make api
-
-# Start the server
-./server
-
-# Query a table
-curl http://localhost:18080/table/Students
+MINIDB_CRASH_AFTER_WAL=insert ./miniDB -u <username> -p
+MINIDB_CRASH_AFTER_WAL=update ./miniDB -u <username> -p
 ```
 
-See [`Documentation/api.md`](./Documentation/api.md) for full endpoint reference.
+This intentionally crashes right after WAL logging so restart recovery can be demonstrated reliably.
+
+---
+
+## REST API
+
+MiniDB exposes a Crow-based REST API through `api/server.cpp`.
+
+### Build
+
+```bash
+make api
+./server
+```
+
+### Base URL
+
+```text
+http://localhost:18080
+```
+
+### Available Routes
+
+#### Authentication
+
+- `POST /login`
+- `POST /logout`
+
+#### Table data
+
+- `GET /tables`
+- `GET /table/<table_name>`
+- `GET /meta/<table_name>`
+- `POST /create`
+- `POST /insert/<table_name>`
+- `POST /bulk_insert/<table_name>`
+
+#### Health
+
+- `GET /health`
+
+### Authentication model
+
+Most routes require:
+
+```text
+X-Session-Token
+```
+
+returned by `/login`.
+
+### Example
+
+```bash
+curl -X POST http://localhost:18080/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"aryan","password":"your_password"}'
+```
+
+Then use the returned token:
+
+```bash
+curl http://localhost:18080/tables \
+  -H "X-Session-Token: <token>"
+```
+
+For endpoint details, see [Documentation/api.md](./Documentation/api.md).
+
+---
+
+## Docker
+
+MiniDB now includes Docker packaging so the current engine can be built and run in a reproducible environment.
+
+### Files added
+
+- [`Dockerfile`](./Dockerfile)
+- [`docker-entrypoint.sh`](./docker-entrypoint.sh)
+- [`.dockerignore`](./.dockerignore)
+- [`docker-compose.yml`](./docker-compose.yml)
+
+### What the image contains
+
+The image builds and packages:
+
+- `miniDB` -> interactive CLI
+- `server` -> REST API server
+
+### Build the image
+
+```bash
+docker build -t minidb-engine .
+```
+
+### Run the API container
+
+```bash
+docker run --rm -p 18080:18080 \
+  -v "$(pwd)/docker-data/table:/app/table" \
+  -v "$(pwd)/docker-data/system:/app/system" \
+  minidb-engine
+```
+
+Health check:
+
+```bash
+curl http://localhost:18080/health
+```
+
+### Run with Docker Compose
+
+```bash
+docker compose up --build
+```
+
+### Run the CLI from the same image
+
+```bash
+docker run --rm -it \
+  -v "$(pwd)/docker-data/table:/app/table" \
+  -v "$(pwd)/docker-data/system:/app/system" \
+  --entrypoint /app/miniDB \
+  minidb-engine -u <username> -p
+```
+
+### Why the mounted volumes matter
+
+MiniDB stores persistent state inside:
+
+- `/app/table`
+- `/app/system`
+
+Those hold:
+
+- table metadata
+- row pages
+- B+ Tree pages
+- WAL/recovery files
+- auth/system files
+
+If you do not mount them, your state disappears when the container is removed.
+
+### Scope note
+
+This Docker layer is for:
+
+- reproducible builds
+- local testing
+- easier evaluation/demo
+- portable project packaging
+
+It should not be described as proof of production scalability on its own.
+
+---
+
+## Repository Layout
+
+```text
+DBMS/
+├── api/
+│   └── server.cpp
+├── include/
+│   ├── auth.h
+│   ├── buffer_pool_manager.h
+│   ├── BPtree.h
+│   ├── data_page.h
+│   ├── disk_manager.h
+│   ├── recovery_manager.h
+│   ├── storage_types.h
+│   ├── tuple_serializer.h
+│   └── ...
+├── src/
+│   ├── auth.cpp
+│   ├── buffer_pool_manager.cpp
+│   ├── BPtree.cpp
+│   ├── create.cpp
+│   ├── data_page.cpp
+│   ├── disk_manager.cpp
+│   ├── display.cpp
+│   ├── file_handler.cpp
+│   ├── insert.cpp
+│   ├── main.cpp
+│   ├── parser.cpp
+│   ├── recovery_manager.cpp
+│   ├── tuple_serializer.cpp
+│   ├── update.cpp
+│   └── where.cpp
+├── table/
+├── system/
+├── Dockerfile
+├── docker-compose.yml
+├── docker-entrypoint.sh
+├── Makefile
+└── README.md
+```
 
 ---
 
 ## Tech Stack
 
-| Component | Technology |
+| Area | Technology |
 |---|---|
-| Core Engine | C++17 — data structures, file I/O, memory management |
-| Build System | Make / GCC |
-| Interface | Terminal (interactive menu + SQL Query Console) |
-| REST API | Crow microframework (optional) |
+| Core engine | C++17 |
+| Build system | Make + GCC/G++ |
+| API layer | Crow |
+| Storage format | custom page-based binary files |
+| Indexing | custom persistent B+ Tree |
+| Caching | custom buffer pool |
+| Recovery | WAL-style REDO logging |
+| Packaging | Docker + Docker Compose |
 
 ---
 
-## Project Goals
+## Known Scope Limits
 
-MiniDB is a systems programming project built to understand how databases actually work at the implementation level. Every component — the buffer pool, the B+ Tree, the slotted page format, the tuple serializer, the query parser — is implemented from scratch to mirror the internal design of production engines like PostgreSQL or InnoDB.
+MiniDB is already substantial, but some DBMS-level work is still out of scope or incomplete:
+
+- no full transaction manager
+- no concurrency control / locking
+- no isolation levels
+- no full ARIES implementation
+- no production-grade query optimizer
+- no full SQL grammar
+- no multi-table join support on current `main`
+
+That said, the current repository is strong as a systems/database project because the core storage and execution layers are real and inspectable.
 
 ---
 
-<div align="center">
-<sub>Built from scratch · No database dependencies · Terminal-based · C++17</sub>
-</div>
+Built to understand how a DBMS actually works internally: parsing, storage, indexing, caching, recovery, and execution.
