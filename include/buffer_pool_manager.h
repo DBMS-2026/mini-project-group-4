@@ -154,6 +154,16 @@ class BufferPoolManager {
      */
     std::size_t checkpoint(std::size_t max_pages = 0);
 
+    /*
+     * What:
+     * Print a visual representation of the buffer pool frames.
+     *
+     * Why:
+     * Useful for demonstrations and understanding cache behavior (hits, dirty
+     * pages, LRU order).
+     */
+    void visualize() const;
+
   private:
     std::size_t pool_size_;
     DiskManager* disk_manager_;

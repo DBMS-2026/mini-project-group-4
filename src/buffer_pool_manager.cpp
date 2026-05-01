@@ -2,9 +2,20 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iostream>
+#include <iomanip>
 
 namespace {
 const uint32_t INVALID_FRAME_ID = UINT32_MAX;
+
+// ANSI escape codes for pretty printing
+#define BP_RESET   "\033[0m"
+#define BP_BOLD    "\033[1m"
+#define BP_CYAN    "\033[36m"
+#define BP_GREEN   "\033[32m"
+#define BP_YELLOW  "\033[33m"
+#define BP_RED     "\033[31m"
+#define BP_DIM     "\033[2m"
 }
 
 /*
@@ -387,4 +398,56 @@ bool BufferPoolManager::should_run_background_flush() const {
      * - if more than half the pool is dirty, start flushing old unpinned pages
      */
     return dirty_page_count() > (pool_size_ / 2);
+}
+
+void BufferPoolManager::visualize() const {
+    std::cout << BP_BOLD << BP_CYAN << "\n[ Buffer Pool Visualization ]" << BP_RESET << "\n";
+    std::cout << BP_DIM << "Pool Size: " << pool_size_ << " frames" << BP_RESET << "\n";
+    std::cout << "----------------------------------------------------------------------\n";
+    std::cout << BP_BOLD << std::left 
+              << std::setw(8) << "Frame" 
+              << std::setw(10) << "PageID" 
+              << std::setw(8) << "Dirty" 
+              << std::setw(8) << "Pinned" 
+              << std::setw(10) << "Status" 
+              << BP_RESET << "\n";
+    std::cout << "----------------------------------------------------------------------\n";
+
+    for (const auto& frame : frames_) {
+        std::cout << std::left << std::setw(8) << frame.frame_id;
+        
+        if (frame.is_valid) {
+            std::cout << std::setw(10) << frame.page_id;
+            
+            if (frame.is_dirty) {
+                std::cout << BP_YELLOW << std::setw(8) << "YES" << BP_RESET;
+            } else {
+                std::cout << std::setw(8) << "no";
+            }
+
+            if (frame.pin_count > 0) {
+                std::cout << BP_GREEN << std::setw(8) << frame.pin_count << BP_RESET;
+            } else {
+                std::cout << std::setw(8) << "0";
+            }
+
+            if (frame.pin_count > 0) {
+                std::cout << BP_BOLD << BP_GREEN << "ACTIVE" << BP_RESET;
+            } else {
+                std::cout << BP_DIM << "IDLE" << BP_RESET;
+            }
+        } else {
+            std::cout << std::setw(10) << "-" 
+                      << std::setw(8) << "-" 
+                      << std::setw(8) << "-" 
+                      << BP_DIM << "EMPTY" << BP_RESET;
+        }
+        std::cout << "\n";
+    }
+    std::cout << "----------------------------------------------------------------------\n";
+    
+    std::cout << BP_BOLD << "Stats: " << BP_RESET
+              << "Hits: " << BP_GREEN << stats_.cache_hits << BP_RESET << " | "
+              << "Misses: " << BP_RED << stats_.cache_misses << BP_RESET << " | "
+              << "Flushes: " << BP_YELLOW << stats_.dirty_flushes << BP_RESET << "\n\n";
 }
